@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "author": "Smart Factory Project",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-dht22", "id": "dht1", "top": -105.3, "left": 186.6, "attrs": { "temperature": "62", "humidity": "55" } },
+    { "type": "wokwi-potentiometer", "id": "pot1", "top": 75.5, "left": -153.8, "attrs": {} },
+    { "type": "wokwi-pushbutton", "id": "btn1", "top": 198.2, "left": 182.4, "attrs": { "color": "red", "label": "E-STOP" } },
+    { "type": "wokwi-led", "id": "led1", "top": 34.8, "left": 253.4, "attrs": { "color": "green", "label": "RUN" } },
+    { "type": "wokwi-led", "id": "led2", "top": 34.8, "left": 292.2, "attrs": { "color": "red", "label": "ALARM" } },
+    { "type": "wokwi-resistor", "id": "r1", "top": 129.6, "left": 249.05, "rotate": 90, "attrs": { "value": "220" } },
+    { "type": "wokwi-resistor", "id": "r2", "top": 129.6, "left": 287.45, "rotate": 90, "attrs": { "value": "220" } }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "dht1:VCC", "esp:3V3", "red", [] ],
+    [ "dht1:GND", "esp:GND.2", "black", [] ],
+    [ "dht1:SDA", "esp:15", "green", [] ],
+    [ "pot1:VCC", "esp:3V3", "red", [] ],
+    [ "pot1:GND", "esp:GND.1", "black", [] ],
+    [ "pot1:SIG", "esp:34", "orange", [] ],
+    [ "btn1:1.l", "esp:4", "blue", [] ],
+    [ "btn1:2.l", "esp:GND.3", "black", [] ],
+    [ "led1:A", "r1:1", "green", [] ],
+    [ "r1:2", "esp:26", "green", [] ],
+    [ "led1:C", "esp:GND.1", "black", [] ],
+    [ "led2:A", "r2:1", "red", [] ],
+    [ "r2:2", "esp:27", "red", [] ],
+    [ "led2:C", "esp:GND.1", "black", [] ]
+  ],
+  "dependencies": {}
+}

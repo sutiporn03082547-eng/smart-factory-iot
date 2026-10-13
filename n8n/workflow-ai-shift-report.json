@@ -1,0 +1,252 @@
+{
+  "id": "SFshiftReport001",
+  "name": "Smart Factory – AI Shift Report",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## AI Shift Report\nTrigger: คำสั่ง /report ใน Telegram (ผ่าน Node-RED) หรืออัตโนมัติทุกสิ้นกะ\nInfluxDB -> สรุปข้อมูล -> AI วิเคราะห์ -> ส่ง Telegram\nถ้ายังไม่ตั้ง AI_API_KEY จะส่งรายงานแบบไม่ใช้ AI แทน",
+        "width": 520,
+        "height": 220
+      },
+      "id": "7b671e1c-0d60-4181-8ad6-f878cad02765",
+      "name": "Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        140,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "factory-report",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "9d187b5e-702a-4bc9-99e8-cbf93d67e30f",
+      "name": "Telegram /report",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        220,
+        220
+      ],
+      "webhookId": "38fa4f07-f91b-4470-a74e-8f9c9796063e"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 0,8,16 * * *"
+            }
+          ]
+        }
+      },
+      "id": "bbcdff1e-c44e-4c88-a429-05b792365542",
+      "name": "ทุกสิ้นกะ (00/08/16 น.)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        220,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================================\n// n8n Code node: ดึงข้อมูลจาก InfluxDB แล้วเตรียม prompt ให้ AI\n// ใช้ร่วมกันทั้ง workflow \"Shift Report\" และ \"Ask AI\"\n// =====================================================================\nconst MODE = 'report'; // 'report' | 'ask'\nconst INFLUX = $env.INFLUX_URL || 'http://influxdb:8086';\nconst ORG = $env.INFLUX_ORG || 'factory';\nconst BUCKET = $env.INFLUX_BUCKET || 'machines';\nconst TOKEN = $env.INFLUX_TOKEN;\n\nconst input = $input.first().json || {};\nconst body = input.body || {};\nconst chat_id = body.chat_id || $env.TELEGRAM_CHAT_ID;\nconst question = (body.question || '').toString().slice(0, 500);\n\n// ---------- CSV parser (รองรับค่าที่มี , และ \" ) ----------\nfunction splitCsv(line) {\n  const out = []; let cur = ''; let q = false;\n  for (let i = 0; i < line.length; i++) {\n    const c = line[i];\n    if (q) {\n      if (c === '\"' && line[i + 1] === '\"') { cur += '\"'; i++; }\n      else if (c === '\"') q = false;\n      else cur += c;\n    } else if (c === '\"') q = true;\n    else if (c === ',') { out.push(cur); cur = ''; }\n    else cur += c;\n  }\n  out.push(cur);\n  return out;\n}\nfunction parseCsv(text) {\n  const rows = []; let header = null;\n  for (const raw of String(text).split(/\\r?\\n/)) {\n    if (!raw.trim()) { header = null; continue; }\n    const cells = splitCsv(raw);\n    if (!header) { header = cells; continue; }\n    const r = {};\n    header.forEach((h, i) => { if (h && h !== 'result' && h !== 'table') r[h] = cells[i]; });\n    rows.push(r);\n  }\n  return rows;\n}\nasync function flux(query) {\n  const res = await this.helpers.httpRequest({\n    method: 'POST',\n    url: `${INFLUX}/api/v2/query?org=${encodeURIComponent(ORG)}`,\n    headers: { Authorization: `Token ${TOKEN}`, 'Content-Type': 'application/json', Accept: 'application/csv' },\n    body: JSON.stringify({ query, type: 'flux', dialect: { header: true, annotations: [] } }),\n    json: false,\n  });\n  return parseCsv(typeof res === 'string' ? res : JSON.stringify(res));\n}\nconst q = flux.bind(this);\nconst B = `from(bucket: \"${BUCKET}\")`;\n\nconst latest = await q(`${B}\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"machine\")\n  |> filter(fn: (r) => contains(value: r._field, set: [\"temp\",\"vibration\",\"oee\",\"availability\",\"performance\",\"quality\",\"count_total\",\"count_reject\",\"state_code\",\"wear\"]))\n  |> last()\n  |> toFloat()\n  |> group(columns: [\"machine\"])\n  |> pivot(rowKey: [\"machine\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()`);\n\nconst peaks = await q(`${B}\n  |> range(start: -8h)\n  |> filter(fn: (r) => r._measurement == \"machine\" and (r._field == \"temp\" or r._field == \"vibration\"))\n  |> group(columns: [\"machine\", \"_field\"])\n  |> max()\n  |> group(columns: [\"machine\"])\n  |> pivot(rowKey: [\"machine\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()`);\n\nconst events = await q(`${B}\n  |> range(start: -8h)\n  |> filter(fn: (r) => r._measurement == \"event\" and r._field == \"message\")\n  |> group()\n  |> keep(columns: [\"_time\", \"machine\", \"level\", \"type\", \"_value\"])\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 30)`);\n\nconst STATE = { 0: 'STOPPED', 1: 'RUNNING', 2: 'ALARM', 3: 'MAINTENANCE' };\nconst pct = (v) => Math.round(Number(v || 0) * 1000) / 10;\nconst machines = latest.map((r) => {\n  const p = peaks.find((x) => x.machine === r.machine) || {};\n  return {\n    machine: r.machine,\n    state: STATE[Number(r.state_code)] || r.state_code,\n    oee_pct: pct(r.oee), availability_pct: pct(r.availability),\n    performance_pct: pct(r.performance), quality_pct: pct(r.quality),\n    produced: Number(r.count_total), rejects: Number(r.count_reject),\n    temp_now: Number(r.temp), vib_now: Number(r.vibration),\n    temp_max_8h: Number(p.temp), vib_max_8h: Number(p.vibration),\n    wear_pct: pct(r.wear),\n  };\n}).sort((a, b) => a.machine.localeCompare(b.machine));\n\nconst factoryOee = machines.length ? Math.round(machines.reduce((s, m) => s + m.oee_pct, 0) / machines.length * 10) / 10 : 0;\nconst ev = events.map((e) => ({ time: e._time, machine: e.machine, level: e.level, type: e.type, message: e._value }));\nconst data = { generated_at: new Date().toISOString(), factory_oee_pct: factoryOee, machines, events_8h: ev };\n\nconst system = 'คุณคือผู้ช่วยวิศวกรซ่อมบำรุงและผู้จัดการฝ่ายผลิตของโรงงาน ตอบเป็นภาษาไทย กระชับ ใช้เฉพาะข้อมูลที่ให้มาเท่านั้น ห้ามแต่งตัวเลขเอง ' +\n  'เกณฑ์: OEE ระดับโลก >= 85%, ความสั่นตามมาตรฐาน ISO 10816 (<4.5 ปกติ, 4.5-7.1 เฝ้าระวัง, >11 อันตราย), อุณหภูมิเตือน 85°C Trip 95°C. ' +\n  'ห้ามใช้ Markdown หรือเครื่องหมาย * # ให้ใช้อีโมจิและขึ้นบรรทัดใหม่แทน';\nconst user = MODE === 'ask'\n  ? `คำถามจากผู้ใช้: \"${question}\"\\n\\nข้อมูลโรงงานล่าสุด (JSON):\\n${JSON.stringify(data)}`\n  : `เขียนรายงานสรุปกะการผลิต ไม่เกิน 1,200 ตัวอักษร ประกอบด้วย 1) OEE โรงงานและการประเมิน 2) เครื่องที่ดีที่สุด/แย่ที่สุดพร้อมเหตุผล 3) เหตุการณ์สำคัญ 4) ความเสี่ยงที่ต้องเฝ้าระวัง (ดูแนวโน้มการสั่น/การสึกหรอ) 5) ข้อแนะนำ 3 ข้อสำหรับกะถัดไป\\n\\nข้อมูล (JSON):\\n${JSON.stringify(data)}`;\n\n// รายงานสำรองเมื่อยังไม่ได้ตั้ง AI_API_KEY\nconst worst = machines.slice().sort((a, b) => a.oee_pct - b.oee_pct)[0];\nconst fallback = [\n  `🏭 สรุปโรงงาน (ไม่ใช้ AI)`,\n  `OEE โรงงาน ${factoryOee}%`,\n  ...machines.map((m) => `• ${m.machine} ${m.state} | OEE ${m.oee_pct}% | ผลิต ${m.produced} | Vib max ${m.vib_max_8h}`),\n  worst ? `ต่ำสุด: ${worst.machine} (${worst.oee_pct}%)` : '',\n  `เหตุการณ์ 8 ชม.: ${ev.length} รายการ`,\n].join('\\n');\n\nconst key = $env.AI_API_KEY || '';\nreturn [{\n  json: {\n    chat_id,\n    mode: MODE,\n    useAI: Boolean(key) && !key.includes('CHANGE_ME'),\n    fallback,\n    data,\n    request: {\n      model: $env.AI_MODEL || 'gpt-4o-mini',\n      temperature: 0.3,\n      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],\n    },\n  },\n}];\n"
+      },
+      "id": "0895eac3-557e-4cb4-b90d-7e8042e6b44f",
+      "name": "Query InfluxDB",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.useAI }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "fcea66d8-ff3b-448a-bf08-26b1d6a1ff1b",
+      "name": "AI key set?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.AI_BASE_URL }}/chat/completions",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.AI_API_KEY }}"
+            }
+          ]
+        }
+      },
+      "id": "341f4e4d-ce5c-4fa1-82be-ceab18ca0d32",
+      "name": "AI (OpenAI-compatible)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================================\n// n8n Code node: แปลงคำตอบ AI เป็นข้อความ Telegram\n// =====================================================================\nconst prep = $('Query InfluxDB').first().json;\nconst ai = $input.first().json || {};\nlet text = ai.choices && ai.choices[0] && ai.choices[0].message ? ai.choices[0].message.content : prep.fallback;\ntext = String(text || prep.fallback).replace(/[*#`]/g, '').trim();\nconst head = prep.mode === 'ask' ? '🤖 AI ตอบจากข้อมูลจริง' : '📋 รายงานกะการผลิต (AI)';\nconst time = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' });\nreturn [{ json: { chat_id: prep.chat_id, text: `${head} | ${time}\\n\\n${text}`.slice(0, 4000) } }];\n"
+      },
+      "id": "bbe65574-298a-4862-8556-dc021ba28acb",
+      "name": "Format message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $json.chat_id, text: $json.text }) }}",
+        "options": {}
+      },
+      "id": "13ed286d-b675-483d-8a8d-ceb573135191",
+      "name": "Telegram sendMessage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1340,
+        300
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, text: $json.text }) }}",
+        "options": {}
+      },
+      "id": "99db2ff9-5ada-488d-b5fb-492a484dde96",
+      "name": "Respond (ผลลัพธ์)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1340,
+        480
+      ]
+    }
+  ],
+  "connections": {
+    "Telegram /report": {
+      "main": [
+        [
+          {
+            "node": "Query InfluxDB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ทุกสิ้นกะ (00/08/16 น.)": {
+      "main": [
+        [
+          {
+            "node": "Query InfluxDB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query InfluxDB": {
+      "main": [
+        [
+          {
+            "node": "AI key set?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI key set?": {
+      "main": [
+        [
+          {
+            "node": "AI (OpenAI-compatible)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI (OpenAI-compatible)": {
+      "main": [
+        [
+          {
+            "node": "Format message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format message": {
+      "main": [
+        [
+          {
+            "node": "Telegram sendMessage",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Respond (ผลลัพธ์)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Bangkok"
+  },
+  "pinData": {},
+  "tags": []
+}

@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Factory Portal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #151b23; --line: #263040; --text: #e6edf3; --muted: #8b98a8;
+    --run: #2ea043; --alarm: #f85149; --maint: #d29922; --stop: #6e7681; --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: "IBM Plex Sans Thai", system-ui, sans-serif; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 16px; }
+  h1 { margin: 0; font-size: 28px; letter-spacing: .3px; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--muted); font-size: 14px; margin-top: 4px; }
+  .mono { font-family: "JetBrains Mono", monospace; }
+  .kpi { display: flex; gap: 24px; align-items: baseline; }
+  .kpi b { font-size: 34px; }
+  .badge { font-size: 12px; padding: 3px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+  h2 { font-size: 16px; color: var(--muted); font-weight: 500; margin: 28px 0 12px; text-transform: uppercase; letter-spacing: 1px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .m-head { display: flex; justify-content: space-between; align-items: center; }
+  .m-id { font-weight: 700; font-size: 20px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .st { font-size: 12px; font-weight: 700; }
+  .m-name { color: var(--muted); font-size: 13px; margin: 2px 0 10px; }
+  .row { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; border-top: 1px dashed var(--line); }
+  .row span:first-child { color: var(--muted); }
+  .frame { width: 100%; height: 620px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+  .links { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  a.link { text-decoration: none; color: var(--text); display: block; }
+  a.link:hover { border-color: var(--accent); }
+  .link small { color: var(--muted); display: block; margin-top: 4px; }
+  .qr-wrap { display: flex; gap: 16px; flex-wrap: wrap; }
+  .qr { background: #fff; padding: 10px; border-radius: 8px; width: fit-content; }
+  .qr-cap { text-align: center; font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .offline { color: var(--muted); font-size: 14px; }
+  footer { margin-top: 36px; color: var(--muted); font-size: 12px; text-align: center; }
+  @media (max-width: 600px) { .frame { height: 480px; } h1 { font-size: 22px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Smart Factory <span>Portal</span></h1>
+      <div class="sub">IoT for Industrial · Azure Ubuntu VM + Apache · ข้อมูลสดจากโรงงานผ่าน DDNS / ZeroTier VPN</div>
+    </div>
+    <div class="kpi">
+      <div><div class="sub">OEE โรงงาน</div><b id="oee" class="mono">--</b></div>
+      <div><div class="sub">อัปเดต</div><span id="updated" class="mono badge">offline</span></div>
+    </div>
+  </header>
+
+  <h2>สถานะเครื่องจักรแบบ Real-time</h2>
+  <div id="machines" class="grid"><div class="offline">กำลังเชื่อมต่อ Node-RED ...</div></div>
+
+  <h2>Executive Dashboard (Grafana บน Server นี้)</h2>
+  <iframe class="frame" id="grafana" title="Grafana executive dashboard" loading="lazy"></iframe>
+
+  <h2>ระบบที่เกี่ยวข้อง</h2>
+  <div class="links">
+    <a class="link card" id="l-grafana" target="_blank" rel="noopener">📊 Grafana Dashboard<small>Viewer account / Public</small></a>
+    <a class="link card" id="l-form" target="_blank" rel="noopener">📝 ใบแจ้งซ่อม (Google Form)<small>บันทึกงานซ่อม → เดินเครื่องอัตโนมัติ</small></a>
+    <a class="link card" id="l-map" target="_blank" rel="noopener">🗺️ ผังโรงงาน (Google My Maps)<small>ตำแหน่งและสถานะเครื่องจักร</small></a>
+    <a class="link card" id="l-sheet" target="_blank" rel="noopener">📗 Production Log (Google Sheets)<small>Log / Alarms / MapStatus</small></a>
+    <a class="link card" id="l-tg" target="_blank" rel="noopener">🤖 Telegram Bot<small>/status /oee /report /ask</small></a>
+    <a class="link card" id="l-gh" target="_blank" rel="noopener">💻 Source Code (GitHub)<small>Docker Compose · Node-RED · n8n</small></a>
+  </div>
+
+  <h2>สแกนเข้าใช้งานจากมือถือ</h2>
+  <div class="qr-wrap">
+    <div><div class="qr" id="qr-grafana"></div><div class="qr-cap">Grafana (Viewer)</div></div>
+    <div><div class="qr" id="qr-form"></div><div class="qr-cap">แจ้งซ่อม</div></div>
+    <div><div class="qr" id="qr-tg"></div><div class="qr-cap">Telegram Bot</div></div>
+  </div>
+
+  <footer>Smart Factory Monitoring &amp; AI Maintenance Platform · Mini-Project วิชาอินเตอร์เน็ตของสรรพสิ่งสำหรับงานอุตสาหกรรม</footer>
+</div>
+
+<script>
+  // ===== ค่าเหล่านี้ถูกแทนที่อัตโนมัติโดย setup-azure.sh =====
+  const CONFIG = {
+    statusApi: "__NODERED_STATUS_API__",          // http://<ddns>:<port>/api/status
+    grafanaUrl: "__GRAFANA_URL__",                // http://<azure-ip>:3000
+    formUrl: "__FORM_URL__",
+    mapUrl: "__MYMAPS_URL__",
+    sheetUrl: "__SHEET_URL__",
+    telegramUrl: "__TELEGRAM_URL__",              // https://t.me/<bot>
+    githubUrl: "__GITHUB_URL__",
+  };
+
+  const COLORS = { 0: "var(--stop)", 1: "var(--run)", 2: "var(--alarm)", 3: "var(--maint)" };
+  const set = (id, url) => { const el = document.getElementById(id); if (el) el.href = url; };
+  set("l-grafana", CONFIG.grafanaUrl + "/d/sf-executive");
+  set("l-form", CONFIG.formUrl); set("l-map", CONFIG.mapUrl); set("l-sheet", CONFIG.sheetUrl);
+  set("l-tg", CONFIG.telegramUrl); set("l-gh", CONFIG.githubUrl);
+  document.getElementById("grafana").src = CONFIG.grafanaUrl + "/d/sf-executive?orgId=1&kiosk&refresh=10s&theme=dark";
+
+  const qr = (id, text) => { try { new QRCode(document.getElementById(id), { text, width: 132, height: 132 }); } catch (e) {} };
+  qr("qr-grafana", CONFIG.grafanaUrl + "/d/sf-executive");
+  qr("qr-form", CONFIG.formUrl);
+  qr("qr-tg", CONFIG.telegramUrl);
+
+  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  async function refresh() {
+    const box = document.getElementById("machines");
+    try {
+      const res = await fetch(CONFIG.statusApi, { cache: "no-store" });
+      const data = await res.json();
+      document.getElementById("oee").textContent = (data.factory_oee * 100).toFixed(1) + "%";
+      document.getElementById("updated").textContent = new Date(data.updated).toLocaleTimeString("th-TH");
+      box.innerHTML = data.machines.map((m) => `
+        <div class="card" style="border-left:4px solid ${COLORS[m.state_code]}">
+          <div class="m-head"><span class="m-id">${esc(m.machine)}</span>
+            <span class="st" style="color:${COLORS[m.state_code]}"><span class="dot" style="background:${COLORS[m.state_code]}"></span>${esc(m.state)}</span></div>
+          <div class="m-name">${esc(m.name)} · ${esc(m.zone)}</div>
+          <div class="row"><span>อุณหภูมิ</span><span class="mono">${Number(m.temp).toFixed(1)} °C</span></div>
+          <div class="row"><span>สั่นสะเทือน</span><span class="mono">${Number(m.vibration).toFixed(2)} mm/s</span></div>
+          <div class="row"><span>OEE</span><span class="mono">${(m.oee * 100).toFixed(1)}%</span></div>
+          <div class="row"><span>ผลิต</span><span class="mono">${m.count_total} ชิ้น</span></div>
+        </div>`).join("");
+    } catch (e) {
+      document.getElementById("updated").textContent = "offline";
+      box.innerHTML = '<div class="offline">เชื่อมต่อ Node-RED ไม่ได้ (ตรวจ DDNS / Port Forwarding)</div>';
+    }
+  }
+  refresh();
+  setInterval(refresh, 5000);
+</script>
+</body>
+</html>

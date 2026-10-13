@@ -1,0 +1,999 @@
+[
+  {
+    "id": "tab_pipeline",
+    "type": "tab",
+    "label": "1. Data Pipeline",
+    "disabled": false,
+    "info": "รับข้อมูลเครื่องจักรผ่าน MQTT -> InfluxDB / Google Sheets / Telegram Alert / API สำหรับ Portal"
+  },
+  {
+    "id": "tab_telegram",
+    "type": "tab",
+    "label": "2. Telegram Bot & Maintenance",
+    "disabled": false,
+    "info": "รับคำสั่งจาก Telegram, ปิดลูปใบแจ้งซ่อมจาก Google Form, เรียก n8n AI"
+  },
+  {
+    "id": "broker_local",
+    "type": "mqtt-broker",
+    "name": "Local Mosquitto",
+    "broker": "mosquitto",
+    "port": "1883",
+    "clientid": "",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true,
+    "autoUnsubscribe": true,
+    "birthTopic": "",
+    "birthQos": "0",
+    "birthPayload": "",
+    "birthMsg": {},
+    "closeTopic": "",
+    "closeQos": "0",
+    "closePayload": "",
+    "closeMsg": {},
+    "willTopic": "",
+    "willQos": "0",
+    "willPayload": "",
+    "willMsg": {},
+    "userProps": "",
+    "sessionExpiry": ""
+  },
+  {
+    "id": "broker_hivemq",
+    "type": "mqtt-broker",
+    "name": "HiveMQ Public (Wokwi M6)",
+    "broker": "broker.hivemq.com",
+    "port": "1883",
+    "clientid": "",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true,
+    "autoUnsubscribe": true,
+    "birthTopic": "",
+    "birthQos": "0",
+    "birthPayload": "",
+    "birthMsg": {},
+    "closeTopic": "",
+    "closeQos": "0",
+    "closePayload": "",
+    "closeMsg": {},
+    "willTopic": "",
+    "willQos": "0",
+    "willPayload": "",
+    "willMsg": {},
+    "userProps": "",
+    "sessionExpiry": ""
+  },
+  {
+    "id": "c_tab_pipeline_190_40",
+    "type": "comment",
+    "z": "tab_pipeline",
+    "name": "① รับข้อมูลเครื่องจักร M1-M5 (Mosquitto) + M6 (Wokwi ESP32 ผ่าน HiveMQ)",
+    "info": "",
+    "x": 190,
+    "y": 40,
+    "wires": []
+  },
+  {
+    "id": "in_local",
+    "type": "mqtt in",
+    "z": "tab_pipeline",
+    "name": "factory/data/+",
+    "topic": "factory/data/+",
+    "qos": "0",
+    "datatype": "json",
+    "broker": "broker_local",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 150,
+    "y": 100,
+    "wires": [
+      [
+        "fn_process"
+      ]
+    ]
+  },
+  {
+    "id": "in_hive",
+    "type": "mqtt in",
+    "z": "tab_pipeline",
+    "name": "HiveMQ M6",
+    "topic": "${HIVEMQ_DATA_TOPIC}",
+    "qos": "0",
+    "datatype": "json",
+    "broker": "broker_hivemq",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 160,
+    "y": 160,
+    "wires": [
+      [
+        "fn_process"
+      ]
+    ]
+  },
+  {
+    "id": "fn_process",
+    "type": "function",
+    "z": "tab_pipeline",
+    "name": "Process + Alarm + Predictive",
+    "func": "// =====================================================================\n// Process machine data  (input: msg.payload = JSON จากเครื่องจักร)\n// output 1 -> InfluxDB write (line protocol)\n// output 2 -> Alert (ส่งต่อ Telegram / Sheets)\n// =====================================================================\nconst d = msg.payload;\nif (!d || typeof d !== \"object\" || !d.machine) {\n    node.warn(\"invalid machine payload\");\n    return null;\n}\n\nconst TEMP_WARN = 85;      // C\nconst VIB_TRIP = 11;       // mm/s\nconst VIB_PREDICT = 4.5;   // เริ่มดูแนวโน้มเมื่อเกินค่านี้\nconst SLOPE_PREDICT = 0.03; // mm/s ต่อ sample\nconst HIST = 10;           // จำนวน sample ล่าสุดที่ใช้คำนวณแนวโน้ม\nconst now = Date.now();\nconst ts = Number(d.ts) || now;\n\n// ---------- เก็บค่าล่าสุดไว้ใช้กับ /status, Sheets, /api/status ----------\nconst latest = global.get(\"latest\") || {};\nlatest[d.machine] = Object.assign({}, d, { received: now });\nglobal.set(\"latest\", latest);\n\n// ---------- InfluxDB line protocol ----------\nconst esc = (v) => String(v).replace(/([,= \\\\])/g, \"\\\\$1\");\nconst str = (v) => '\"' + String(v ?? \"\").replace(/([\"\\\\])/g, \"\\\\$1\") + '\"';\nconst num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);\nconst int = (v) => Math.round(num(v)) + \"i\";\n\nconst tags = [\n    \"machine=\" + esc(d.machine),\n    \"line=\" + esc(d.line || \"-\"),\n    \"zone=\" + esc(d.zone || \"-\"),\n    \"name=\" + esc(d.name || d.machine),\n];\nconst fields = [\n    \"temp=\" + num(d.temp),\n    \"vibration=\" + num(d.vibration),\n    \"rpm=\" + num(d.rpm),\n    \"state_code=\" + int(d.state_code),\n    \"count_total=\" + int(d.count_total),\n    \"count_good=\" + int(d.count_good),\n    \"count_reject=\" + int(d.count_reject),\n    \"availability=\" + num(d.availability),\n    \"performance=\" + num(d.performance),\n    \"quality=\" + num(d.quality),\n    \"oee=\" + num(d.oee),\n    \"wear=\" + num(d.wear),\n    \"state=\" + str(d.state),\n    \"fault=\" + str(d.fault),\n];\nconst lines = [\"machine,\" + tags.join(\",\") + \" \" + fields.join(\",\") + \" \" + ts];\n\n// ---------- Alarm / Predictive logic ----------\nconst st = flow.get(\"alarmState\") || {};\nconst s = st[d.machine] || { prev: null, last: {}, hist: [], lastTs: ts };\nconst tick = Math.max(0.5, (ts - (s.lastTs || ts)) / 1000) || 2;\ns.lastTs = ts;\ns.hist.push(num(d.vibration));\nif (s.hist.length > HIST) s.hist.shift();\n\nfunction slope(arr) {\n    const n = arr.length;\n    if (n < 8) return 0;\n    let sx = 0, sy = 0, sxy = 0, sxx = 0;\n    for (let i = 0; i < n; i++) { sx += i; sy += arr[i]; sxy += i * arr[i]; sxx += i * i; }\n    return (n * sxy - sx * sy) / (n * sxx - sx * sx);\n}\nfunction cooled(type, ms) {\n    const t = s.last[type] || 0;\n    if (now - t < ms) return false;\n    s.last[type] = now;\n    return true;\n}\n\nconst alerts = [];\nconst label = `${d.machine} (${d.name || \"\"})`;\nconst code = num(d.state_code);\n\nif (code === 2 && s.prev !== 2) {\n    const reason = { overtemp: \"อุณหภูมิสูงเกิน\", overvibration: \"สั่นสะเทือนเกิน\", jam: \"ชิ้นงานติด\" }[d.trip_reason] || d.trip_reason || \"ไม่ทราบสาเหตุ\";\n    alerts.push({ level: \"critical\", type: \"TRIP\", text: `🚨 ${label} หยุดฉุกเฉิน: ${reason}\\nTemp ${num(d.temp).toFixed(1)}°C | Vib ${num(d.vibration).toFixed(2)} mm/s` });\n}\nif (code === 1 && num(d.temp) >= TEMP_WARN && cooled(\"TEMP\", 5 * 60 * 1000)) {\n    alerts.push({ level: \"warning\", type: \"OVERTEMP\", text: `🌡️ ${label} อุณหภูมิสูง ${num(d.temp).toFixed(1)}°C (เกณฑ์เตือน ${TEMP_WARN}°C)` });\n}\nconst sl = slope(s.hist);\nif (code === 1 && num(d.vibration) >= VIB_PREDICT && sl >= SLOPE_PREDICT && cooled(\"PREDICT\", 10 * 60 * 1000)) {\n    const etaSec = Math.max(0, (VIB_TRIP - num(d.vibration)) / sl * tick);\n    const eta = etaSec >= 60 ? `${(etaSec / 60).toFixed(1)} นาที` : `${Math.round(etaSec)} วินาที`;\n    alerts.push({\n        level: \"warning\", type: \"PREDICT\",\n        text: `🔮 Predictive: ${label} ค่าสั่นกำลังไต่ขึ้น (${num(d.vibration).toFixed(2)} mm/s, +${sl.toFixed(3)}/รอบ)\\nคาดว่าจะ Trip ในอีก ~${eta} แนะนำตรวจลูกปืนก่อนเครื่องพัง`,\n    });\n}\nif (code === 1 && (s.prev === 2 || s.prev === 3)) {\n    alerts.push({ level: \"info\", type: \"RECOVER\", text: `✅ ${label} กลับมาทำงานปกติแล้ว` });\n    s.hist = [];\n}\ns.prev = code;\nst[d.machine] = s;\nflow.set(\"alarmState\", st);\n\n// event log ลง InfluxDB (ใช้ทำตาราง Alarm log ใน Grafana)\nfor (const a of alerts) {\n    lines.push(`event,machine=${esc(d.machine)},level=${a.level},type=${a.type} message=${str(a.text.replace(/\\n/g, \" | \"))},value=1i ${ts}`);\n}\n\nconst influxMsg = {\n    url: `${env.get(\"INFLUX_URL\")}/api/v2/write?org=${encodeURIComponent(env.get(\"INFLUX_ORG\"))}&bucket=${encodeURIComponent(env.get(\"INFLUX_BUCKET\"))}&precision=ms`,\n    method: \"POST\",\n    headers: { Authorization: \"Token \" + env.get(\"INFLUX_TOKEN\"), \"Content-Type\": \"text/plain; charset=utf-8\" },\n    payload: lines.join(\"\\n\"),\n};\n\nconst alertMsgs = alerts.map((a) => ({\n    topic: \"alert\",\n    payload: Object.assign({ machine: d.machine, name: d.name, ts }, a),\n}));\n\nnode.status({ fill: code === 1 ? \"green\" : code === 2 ? \"red\" : \"yellow\", shape: \"dot\", text: `${d.machine} ${d.state} ${new Date().toLocaleTimeString()}` });\nreturn [influxMsg, alertMsgs.length ? alertMsgs : null];\n",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 420,
+    "y": 130,
+    "wires": [
+      [
+        "http_influx"
+      ],
+      [
+        "fn_alert"
+      ]
+    ]
+  },
+  {
+    "id": "http_influx",
+    "type": "http request",
+    "z": "tab_pipeline",
+    "name": "InfluxDB write",
+    "method": "use",
+    "ret": "txt",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 720,
+    "y": 100,
+    "wires": [
+      [
+        "dbg_influx"
+      ]
+    ]
+  },
+  {
+    "id": "dbg_influx",
+    "type": "debug",
+    "z": "tab_pipeline",
+    "name": "influx result",
+    "active": false,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 900,
+    "y": 100,
+    "wires": []
+  },
+  {
+    "id": "c_tab_pipeline_170_220",
+    "type": "comment",
+    "z": "tab_pipeline",
+    "name": "② Alert -> Telegram + Google Sheets (Alarms)",
+    "info": "",
+    "x": 170,
+    "y": 220,
+    "wires": []
+  },
+  {
+    "id": "fn_alert",
+    "type": "function",
+    "z": "tab_pipeline",
+    "name": "Alert router",
+    "func": "// =====================================================================\n// Alert router  (input: msg.payload = alert จาก Process machine data)\n// output 1 -> Telegram (ข้อความ + ปุ่มเปิด Google Form แจ้งซ่อม)\n// output 2 -> Google Sheets (แท็บ Alarms)\n// =====================================================================\nconst a = msg.payload;\nconst icon = { critical: \"🔴 CRITICAL\", warning: \"🟠 WARNING\", info: \"🟢 INFO\" }[a.level] || a.level;\nconst time = new Date(a.ts).toLocaleString(\"th-TH\", { timeZone: \"Asia/Bangkok\" });\n\nlet buttons = null;\nconst form = env.get(\"FORM_PREFILL_URL\") || \"\";\nif ((a.type === \"TRIP\" || a.type === \"PREDICT\") && form && !form.includes(\"CHANGE_ME\")) {\n    buttons = [[{ text: `📝 แจ้งซ่อม ${a.machine} (Google Form)`, url: form.replace(\"{machine}\", encodeURIComponent(a.machine)) }]];\n}\n\nconst tg = {\n    payload: {\n        text: `<b>${icon}</b> | ${time}\\n${a.text}`,\n        buttons,\n    },\n};\n\nconst sheet = {\n    payload: {\n        action: \"alarm\",\n        row: [time, a.machine, a.name || \"\", a.level, a.type, a.text.replace(/\\n/g, \" | \")],\n    },\n};\nreturn [tg, sheet];\n",
+    "outputs": 2,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 660,
+    "y": 180,
+    "wires": [
+      [
+        "fn_tg1"
+      ],
+      [
+        "fn_sheet1"
+      ]
+    ]
+  },
+  {
+    "id": "fn_tg1",
+    "type": "function",
+    "z": "tab_pipeline",
+    "name": "Telegram msg",
+    "func": "// =====================================================================\n// Telegram sendMessage builder (W11)\n// input: msg.payload = { text, chat_id?, buttons? }\n// output -> http request (POST https://api.telegram.org/bot<TOKEN>/sendMessage)\n// =====================================================================\nconst token = env.get(\"TELEGRAM_BOT_TOKEN\") || \"\";\nconst chat = msg.payload.chat_id || env.get(\"TELEGRAM_CHAT_ID\");\nif (!token || token.includes(\"CHANGE_ME\") || !chat || String(chat).includes(\"CHANGE_ME\")) {\n    node.status({ fill: \"grey\", shape: \"ring\", text: \"Telegram ยังไม่ตั้งค่า token/chat_id\" });\n    return null;\n}\nconst body = {\n    chat_id: chat,\n    text: msg.payload.text,\n    parse_mode: \"HTML\",\n    disable_web_page_preview: true,\n};\nif (msg.payload.buttons) body.reply_markup = { inline_keyboard: msg.payload.buttons };\n\nnode.status({ fill: \"blue\", shape: \"dot\", text: \"sent \" + new Date().toLocaleTimeString() });\nreturn {\n    url: `https://api.telegram.org/bot${token}/sendMessage`,\n    method: \"POST\",\n    headers: { \"Content-Type\": \"application/json\" },\n    payload: body,\n};\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 880,
+    "y": 160,
+    "wires": [
+      [
+        "http_tg1"
+      ]
+    ]
+  },
+  {
+    "id": "http_tg1",
+    "type": "http request",
+    "z": "tab_pipeline",
+    "name": "Telegram API",
+    "method": "use",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 1080,
+    "y": 160,
+    "wires": [
+      [
+        "dbg_tg1"
+      ]
+    ]
+  },
+  {
+    "id": "dbg_tg1",
+    "type": "debug",
+    "z": "tab_pipeline",
+    "name": "telegram result",
+    "active": false,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 1260,
+    "y": 160,
+    "wires": []
+  },
+  {
+    "id": "c_tab_pipeline_170_300",
+    "type": "comment",
+    "z": "tab_pipeline",
+    "name": "③ Production log ทุก 1 นาที -> Google Sheets",
+    "info": "",
+    "x": 170,
+    "y": 300,
+    "wires": []
+  },
+  {
+    "id": "inj_log",
+    "type": "inject",
+    "z": "tab_pipeline",
+    "name": "ทุก 60 วินาที",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "60",
+    "crontab": "",
+    "once": true,
+    "onceDelay": "20",
+    "topic": "",
+    "payload": "",
+    "payloadType": "date",
+    "x": 160,
+    "y": 340,
+    "wires": [
+      [
+        "fn_log"
+      ]
+    ]
+  },
+  {
+    "id": "fn_log",
+    "type": "function",
+    "z": "tab_pipeline",
+    "name": "Build log rows",
+    "func": "// =====================================================================\n// Production log ทุก 1 นาที -> Google Sheets แท็บ Log (W10)\n// อ่านค่าล่าสุดของทุกเครื่องจาก flow context\n// =====================================================================\nconst latest = global.get(\"latest\") || {};\nconst ids = Object.keys(latest).sort();\nif (!ids.length) return null;\n\nconst time = new Date().toLocaleString(\"th-TH\", { timeZone: \"Asia/Bangkok\" });\nconst rows = ids.map((id) => {\n    const d = latest[id];\n    return [\n        time, d.machine, d.name || \"\", d.zone || \"\", d.state,\n        d.temp, d.vibration, d.count_total, d.count_good, d.count_reject,\n        Math.round((d.oee || 0) * 1000) / 10,\n    ];\n});\nreturn { payload: { action: \"log\", rows } };\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 380,
+    "y": 340,
+    "wires": [
+      [
+        "fn_sheet1"
+      ]
+    ]
+  },
+  {
+    "id": "fn_sheet1",
+    "type": "function",
+    "z": "tab_pipeline",
+    "name": "Sheets request",
+    "func": "// =====================================================================\n// Google Sheets (Apps Script Web App) builder (W10)\n// input: msg.payload = { action: \"log\"|\"alarm\"|..., ... }\n// output -> http request POST SHEETS_URL\n// =====================================================================\nconst url = env.get(\"SHEETS_URL\") || \"\";\nif (!url || url.includes(\"CHANGE_ME\")) {\n    node.status({ fill: \"grey\", shape: \"ring\", text: \"SHEETS_URL ยังไม่ตั้งค่า\" });\n    return null;\n}\nnode.status({ fill: \"green\", shape: \"dot\", text: msg.payload.action + \" \" + new Date().toLocaleTimeString() });\nreturn {\n    url,\n    method: \"POST\",\n    headers: { \"Content-Type\": \"application/json\" },\n    payload: JSON.stringify(msg.payload),\n};\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 880,
+    "y": 220,
+    "wires": [
+      [
+        "http_sheet1"
+      ]
+    ]
+  },
+  {
+    "id": "http_sheet1",
+    "type": "http request",
+    "z": "tab_pipeline",
+    "name": "Apps Script",
+    "method": "use",
+    "ret": "txt",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 1080,
+    "y": 220,
+    "wires": [
+      [
+        "dbg_sheet1"
+      ]
+    ]
+  },
+  {
+    "id": "dbg_sheet1",
+    "type": "debug",
+    "z": "tab_pipeline",
+    "name": "sheets result",
+    "active": false,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 1260,
+    "y": 220,
+    "wires": []
+  },
+  {
+    "id": "c_tab_pipeline_190_420",
+    "type": "comment",
+    "z": "tab_pipeline",
+    "name": "④ REST API สำหรับ Factory Portal (Azure) – เปิดผ่าน DDNS/Port Forward",
+    "info": "",
+    "x": 190,
+    "y": 420,
+    "wires": []
+  },
+  {
+    "id": "httpin_status",
+    "type": "http in",
+    "z": "tab_pipeline",
+    "name": "",
+    "url": "/api/status",
+    "method": "get",
+    "upload": false,
+    "swaggerDoc": "",
+    "x": 170,
+    "y": 460,
+    "wires": [
+      [
+        "fn_api"
+      ]
+    ]
+  },
+  {
+    "id": "fn_api",
+    "type": "function",
+    "z": "tab_pipeline",
+    "name": "Status JSON",
+    "func": "// =====================================================================\n// GET /api/status -> JSON สถานะเครื่องทั้งหมด\n// ใช้กับหน้า Factory Portal บน Azure (เข้าผ่าน DDNS + Port Forwarding, W9)\n// =====================================================================\nconst latest = global.get(\"latest\") || {};\nconst machines = Object.keys(latest).sort().map((k) => {\n    const d = latest[k];\n    return {\n        machine: d.machine, name: d.name, zone: d.zone, state: d.state, state_code: d.state_code,\n        temp: d.temp, vibration: d.vibration, oee: d.oee, count_total: d.count_total,\n        online: Date.now() - d.received < 15000,\n    };\n});\nconst oee = machines.length ? machines.reduce((s, m) => s + Number(m.oee || 0), 0) / machines.length : 0;\nmsg.payload = { updated: new Date().toISOString(), factory_oee: Math.round(oee * 10000) / 10000, machines };\nreturn msg;\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 380,
+    "y": 460,
+    "wires": [
+      [
+        "httpres_status"
+      ]
+    ]
+  },
+  {
+    "id": "httpres_status",
+    "type": "http response",
+    "z": "tab_pipeline",
+    "name": "",
+    "statusCode": "",
+    "headers": {
+      "Access-Control-Allow-Origin": "*",
+      "content-type": "application/json"
+    },
+    "x": 570,
+    "y": 460,
+    "wires": []
+  },
+  {
+    "id": "c_tab_pipeline_200_520",
+    "type": "comment",
+    "z": "tab_pipeline",
+    "name": "⑤ Demo / Control API: GET /api/cmd?machine=M3&action=fault&fault=bearing",
+    "info": "",
+    "x": 200,
+    "y": 520,
+    "wires": []
+  },
+  {
+    "id": "httpin_cmd",
+    "type": "http in",
+    "z": "tab_pipeline",
+    "name": "",
+    "url": "/api/cmd",
+    "method": "get",
+    "upload": false,
+    "swaggerDoc": "",
+    "x": 160,
+    "y": 560,
+    "wires": [
+      [
+        "fn_cmd"
+      ]
+    ]
+  },
+  {
+    "id": "fn_cmd",
+    "type": "function",
+    "z": "tab_pipeline",
+    "name": "Command API",
+    "func": "// =====================================================================\n// GET /api/cmd?machine=M3&action=fault&fault=bearing\n//   action: stop | start | fault | maintenance | repair | reset_shift\n//   machine: M1-M6 หรือ all\n// ใช้กับ TEST-FAULT.bat, ปุ่มเดโม และทดสอบจากเบราว์เซอร์\n// ถ้าตั้ง CMD_API_KEY ใน .env ต้องส่ง &key=... ด้วย (แนะนำเมื่อเปิด Port Forwarding)\n// output 1 -> MQTT local | output 2 -> MQTT HiveMQ (M6) | output 3 -> http response\n// =====================================================================\nconst q = msg.req.query || {};\nconst key = env.get(\"CMD_API_KEY\") || \"\";\nconst reply = (code, body) => [null, null, { req: msg.req, res: msg.res, statusCode: code, payload: body }];\n\nif (key && q.key !== key) return reply(403, { ok: false, error: \"invalid key\" });\n\nconst action = String(q.action || \"\").toLowerCase();\nconst allowed = [\"stop\", \"start\", \"fault\", \"maintenance\", \"repair\", \"reset_shift\"];\nif (!allowed.includes(action)) return reply(400, { ok: false, error: \"action must be one of \" + allowed.join(\", \") });\n\nconst target = String(q.machine || \"\").toUpperCase();\nif (!/^(M\\d+|ALL)$/.test(target)) return reply(400, { ok: false, error: \"machine must be M1..M6 or all\" });\n\nconst body = { action, by: \"api\" };\nif (action === \"fault\") body.fault = String(q.fault || \"bearing\").toLowerCase();\n\nconst prefix = env.get(\"HIVEMQ_PREFIX\") || \"smf\";\nconst local = [], hive = [];\nif (target === \"ALL\") {\n    local.push({ topic: \"factory/cmd/all\", payload: JSON.stringify(body) });\n    hive.push({ topic: `${prefix}/factory/cmd/M6`, payload: JSON.stringify(body) });\n} else if (target === \"M6\") {\n    hive.push({ topic: `${prefix}/factory/cmd/M6`, payload: JSON.stringify(body) });\n} else {\n    local.push({ topic: `factory/cmd/${target}`, payload: JSON.stringify(body) });\n}\nnode.status({ fill: \"blue\", shape: \"dot\", text: `${target} ${action} ${body.fault || \"\"}` });\nreturn [local, hive, { req: msg.req, res: msg.res, statusCode: 200, payload: { ok: true, machine: target, ...body } }];\n",
+    "outputs": 3,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 380,
+    "y": 560,
+    "wires": [
+      [
+        "mqtt_local1"
+      ],
+      [
+        "mqtt_hive1"
+      ],
+      [
+        "httpres_cmd"
+      ]
+    ]
+  },
+  {
+    "id": "mqtt_local1",
+    "type": "mqtt out",
+    "z": "tab_pipeline",
+    "name": "cmd -> Mosquitto",
+    "topic": "",
+    "qos": "",
+    "retain": "",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "broker_local",
+    "x": 620,
+    "y": 520,
+    "wires": []
+  },
+  {
+    "id": "mqtt_hive1",
+    "type": "mqtt out",
+    "z": "tab_pipeline",
+    "name": "cmd -> HiveMQ (M6)",
+    "topic": "",
+    "qos": "",
+    "retain": "",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "broker_hivemq",
+    "x": 630,
+    "y": 560,
+    "wires": []
+  },
+  {
+    "id": "httpres_cmd",
+    "type": "http response",
+    "z": "tab_pipeline",
+    "name": "",
+    "statusCode": "",
+    "headers": {
+      "Access-Control-Allow-Origin": "*"
+    },
+    "x": 590,
+    "y": 600,
+    "wires": []
+  },
+  {
+    "id": "catch1",
+    "type": "catch",
+    "z": "tab_pipeline",
+    "name": "Errors",
+    "scope": null,
+    "uncaught": false,
+    "x": 140,
+    "y": 660,
+    "wires": [
+      [
+        "dbg_err1"
+      ]
+    ]
+  },
+  {
+    "id": "dbg_err1",
+    "type": "debug",
+    "z": "tab_pipeline",
+    "name": "errors",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 320,
+    "y": 660,
+    "wires": []
+  },
+  {
+    "id": "c_tab_telegram_200_40",
+    "type": "comment",
+    "z": "tab_telegram",
+    "name": "① Telegram Bot: /status /oee /stop /run /fault /maint /repair /report /ask",
+    "info": "",
+    "x": 200,
+    "y": 40,
+    "wires": []
+  },
+  {
+    "id": "inj_tg",
+    "type": "inject",
+    "z": "tab_telegram",
+    "name": "ทุก 3 วินาที",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "3",
+    "crontab": "",
+    "once": true,
+    "onceDelay": "5",
+    "topic": "",
+    "payload": "",
+    "payloadType": "date",
+    "x": 150,
+    "y": 100,
+    "wires": [
+      [
+        "fn_tgpoll"
+      ]
+    ]
+  },
+  {
+    "id": "fn_tgpoll",
+    "type": "function",
+    "z": "tab_telegram",
+    "name": "getUpdates",
+    "func": "// =====================================================================\n// Telegram getUpdates (polling ทุก 3 วินาที) - รับคำสั่งจากแชท\n// =====================================================================\nconst token = env.get(\"TELEGRAM_BOT_TOKEN\") || \"\";\nif (!token || token.includes(\"CHANGE_ME\")) return null;\n\n// กันยิงซ้อนถ้ารอบก่อนยังไม่ตอบกลับ (หมดเวลา 15 วินาทีถือว่าค้าง)\nconst busy = flow.get(\"tgBusy\") || 0;\nif (Date.now() - busy < 15000) return null;\nflow.set(\"tgBusy\", Date.now());\n\nconst offset = flow.get(\"tgOffset\") || 0;\nreturn {\n    url: `https://api.telegram.org/bot${token}/getUpdates?timeout=0&offset=${offset}&allowed_updates=%5B%22message%22%5D`,\n    method: \"GET\",\n};\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 340,
+    "y": 100,
+    "wires": [
+      [
+        "http_tgpoll"
+      ]
+    ]
+  },
+  {
+    "id": "http_tgpoll",
+    "type": "http request",
+    "z": "tab_telegram",
+    "name": "Telegram API",
+    "method": "use",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 530,
+    "y": 100,
+    "wires": [
+      [
+        "fn_tgcmd"
+      ]
+    ]
+  },
+  {
+    "id": "fn_tgcmd",
+    "type": "function",
+    "z": "tab_telegram",
+    "name": "Command parser",
+    "func": "// =====================================================================\n// Telegram command parser\n// output 1 -> MQTT คำสั่งเครื่อง M1-M5 (local Mosquitto)\n// output 2 -> MQTT คำสั่งเครื่อง M6 (Wokwi ESP32 ผ่าน HiveMQ)\n// output 3 -> ตอบกลับ Telegram\n// output 4 -> เรียก n8n (AI report / ถาม AI)\n// =====================================================================\nflow.set(\"tgBusy\", 0);\nconst res = msg.payload;\nif (!res || !res.ok || !Array.isArray(res.result)) return null;\n\nconst allowed = (env.get(\"TELEGRAM_ALLOWED\") || env.get(\"TELEGRAM_CHAT_ID\") || \"\")\n    .split(\",\").map((x) => x.trim()).filter(Boolean);\nconst latest = global.get(\"latest\") || {};\nconst prefix = env.get(\"HIVEMQ_PREFIX\") || \"smf\";\nconst n8n = env.get(\"N8N_URL\") || \"http://n8n:5678\";\n\nconst out1 = [], out2 = [], out3 = [], out4 = [];\nconst reply = (chat_id, text) => out3.push({ payload: { chat_id, text } });\nconst pct = (v) => (Number(v || 0) * 100).toFixed(1) + \"%\";\nconst dot = (c) => [\"⚪\", \"🟢\", \"🔴\", \"🟠\"][c] || \"⚪\";\n\nfunction sendCmd(id, body) {\n    const m = { topic: null, payload: JSON.stringify(body) };\n    if (id === \"M6\") { m.topic = `${prefix}/factory/cmd/M6`; out2.push(m); }\n    else { m.topic = `factory/cmd/${id}`; out1.push(m); }\n}\nfunction targets(arg) {\n    if (!arg) return [];\n    const a = arg.toUpperCase();\n    if (a === \"ALL\") return Object.keys(latest).sort();\n    return /^M\\d+$/.test(a) ? [a] : [];\n}\nfunction statusLine(d) {\n    return `${dot(d.state_code)} <b>${d.machine}</b> ${d.name || \"\"}\\n   ${d.state} | ${Number(d.temp).toFixed(1)}°C | ${Number(d.vibration).toFixed(2)} mm/s | OEE ${pct(d.oee)}`;\n}\n\nconst HELP = [\n    \"<b>🏭 Smart Factory Bot</b>\",\n    \"/status – สถานะทุกเครื่อง\",\n    \"/status M3 – รายละเอียดเครื่อง\",\n    \"/oee – สรุป OEE ทั้งโรงงาน\",\n    \"/stop M3 | /run M3 – หยุด/เดินเครื่อง (ใช้ all ได้)\",\n    \"/fault M3 bearing|overheat|jam – จำลองเครื่องเสีย\",\n    \"/maint M3 – เข้าสู่โหมดซ่อมบำรุง\",\n    \"/repair M3 – ซ่อมเสร็จ เดินเครื่องต่อ\",\n    \"/report – ให้ AI สรุปรายงานกะ\",\n    \"/ask คำถาม – ถาม AI จากข้อมูลจริง\",\n].join(\"\\n\");\n\nlet maxId = flow.get(\"tgOffset\") || 0;\nfor (const u of res.result) {\n    maxId = Math.max(maxId, u.update_id + 1);\n    const m = u.message;\n    if (!m || !m.text) continue;\n    const chat = String(m.chat.id);\n    if (allowed.length && !allowed.includes(chat)) {\n        reply(chat, `⛔ chat นี้ไม่มีสิทธิ์สั่งงาน (chat_id: ${chat})`);\n        continue;\n    }\n    const [rawCmd, ...rest] = m.text.trim().split(/\\s+/);\n    const cmd = rawCmd.split(\"@\")[0].toLowerCase();\n    const arg = rest[0];\n    const ids = targets(arg);\n\n    switch (cmd) {\n        case \"/start\":\n        case \"/help\":\n            reply(chat, HELP);\n            break;\n        case \"/status\": {\n            if (ids.length === 1 && latest[ids[0]]) {\n                const d = latest[ids[0]];\n                reply(chat, [\n                    statusLine(d),\n                    `   RPM ${d.rpm} | Wear ${pct(d.wear)} | Fault: ${d.fault}`,\n                    `   ผลิต ${d.count_total} (ดี ${d.count_good} / เสีย ${d.count_reject})`,\n                    `   A ${pct(d.availability)} × P ${pct(d.performance)} × Q ${pct(d.quality)} = OEE ${pct(d.oee)}`,\n                ].join(\"\\n\"));\n            } else {\n                const lines = Object.keys(latest).sort().map((k) => statusLine(latest[k]));\n                reply(chat, lines.length ? \"<b>📊 สถานะเครื่องจักร</b>\\n\" + lines.join(\"\\n\") : \"ยังไม่มีข้อมูลจากเครื่องจักร\");\n            }\n            break;\n        }\n        case \"/oee\": {\n            const ds = Object.values(latest);\n            if (!ds.length) { reply(chat, \"ยังไม่มีข้อมูล\"); break; }\n            const avg = ds.reduce((s, d) => s + Number(d.oee || 0), 0) / ds.length;\n            const total = ds.reduce((s, d) => s + Number(d.count_total || 0), 0);\n            const worst = ds.slice().sort((a, b) => a.oee - b.oee)[0];\n            reply(chat, `<b>📈 OEE โรงงาน ${pct(avg)}</b>\\nผลิตรวม ${total} ชิ้น\\nต่ำสุด: ${worst.machine} ${pct(worst.oee)}\\n(มาตรฐานระดับโลก ≥ 85%)`);\n            break;\n        }\n        case \"/stop\":\n        case \"/run\":\n        case \"/maint\":\n        case \"/repair\": {\n            if (!ids.length) { reply(chat, `ระบุเครื่องด้วย เช่น ${cmd} M3`); break; }\n            const action = { \"/stop\": \"stop\", \"/run\": \"start\", \"/maint\": \"maintenance\", \"/repair\": \"repair\" }[cmd];\n            ids.forEach((id) => sendCmd(id, { action, by: m.from.first_name || \"telegram\" }));\n            reply(chat, `📨 ส่งคำสั่ง <b>${action}</b> ไปที่ ${ids.join(\", \")} แล้ว`);\n            break;\n        }\n        case \"/fault\": {\n            if (!ids.length) { reply(chat, \"เช่น /fault M3 bearing\"); break; }\n            const f = (rest[1] || \"bearing\").toLowerCase();\n            ids.forEach((id) => sendCmd(id, { action: \"fault\", fault: f }));\n            reply(chat, `🧪 จำลองความเสียหาย <b>${f}</b> ที่ ${ids.join(\", \")}`);\n            break;\n        }\n        case \"/report\":\n            out4.push({ url: `${n8n}/webhook/factory-report`, method: \"POST\", headers: { \"Content-Type\": \"application/json\" }, payload: { chat_id: chat } });\n            reply(chat, \"⏳ กำลังให้ AI สรุปรายงานกะ...\");\n            break;\n        case \"/ask\": {\n            const q = rest.join(\" \").trim();\n            if (!q) { reply(chat, \"เช่น /ask เครื่องไหนน่าห่วงที่สุดตอนนี้\"); break; }\n            out4.push({ url: `${n8n}/webhook/factory-ask`, method: \"POST\", headers: { \"Content-Type\": \"application/json\" }, payload: { chat_id: chat, question: q } });\n            reply(chat, \"🤖 กำลังวิเคราะห์ข้อมูล...\");\n            break;\n        }\n        default:\n            reply(chat, \"ไม่รู้จักคำสั่งนี้ พิมพ์ /help\");\n    }\n}\nflow.set(\"tgOffset\", maxId);\nreturn [out1, out2, out3, out4];\n",
+    "outputs": 4,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 740,
+    "y": 100,
+    "wires": [
+      [
+        "mqtt_local"
+      ],
+      [
+        "mqtt_hive"
+      ],
+      [
+        "fn_tg2"
+      ],
+      [
+        "http_n8n"
+      ]
+    ]
+  },
+  {
+    "id": "mqtt_local",
+    "type": "mqtt out",
+    "z": "tab_telegram",
+    "name": "cmd -> Mosquitto",
+    "topic": "",
+    "qos": "",
+    "retain": "",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "broker_local",
+    "x": 1010,
+    "y": 40,
+    "wires": []
+  },
+  {
+    "id": "mqtt_hive",
+    "type": "mqtt out",
+    "z": "tab_telegram",
+    "name": "cmd -> HiveMQ (M6)",
+    "topic": "",
+    "qos": "",
+    "retain": "",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "broker_hivemq",
+    "x": 1010,
+    "y": 80,
+    "wires": []
+  },
+  {
+    "id": "fn_tg2",
+    "type": "function",
+    "z": "tab_telegram",
+    "name": "Telegram msg",
+    "func": "// =====================================================================\n// Telegram sendMessage builder (W11)\n// input: msg.payload = { text, chat_id?, buttons? }\n// output -> http request (POST https://api.telegram.org/bot<TOKEN>/sendMessage)\n// =====================================================================\nconst token = env.get(\"TELEGRAM_BOT_TOKEN\") || \"\";\nconst chat = msg.payload.chat_id || env.get(\"TELEGRAM_CHAT_ID\");\nif (!token || token.includes(\"CHANGE_ME\") || !chat || String(chat).includes(\"CHANGE_ME\")) {\n    node.status({ fill: \"grey\", shape: \"ring\", text: \"Telegram ยังไม่ตั้งค่า token/chat_id\" });\n    return null;\n}\nconst body = {\n    chat_id: chat,\n    text: msg.payload.text,\n    parse_mode: \"HTML\",\n    disable_web_page_preview: true,\n};\nif (msg.payload.buttons) body.reply_markup = { inline_keyboard: msg.payload.buttons };\n\nnode.status({ fill: \"blue\", shape: \"dot\", text: \"sent \" + new Date().toLocaleTimeString() });\nreturn {\n    url: `https://api.telegram.org/bot${token}/sendMessage`,\n    method: \"POST\",\n    headers: { \"Content-Type\": \"application/json\" },\n    payload: body,\n};\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 1000,
+    "y": 140,
+    "wires": [
+      [
+        "http_tg2"
+      ]
+    ]
+  },
+  {
+    "id": "http_tg2",
+    "type": "http request",
+    "z": "tab_telegram",
+    "name": "Telegram API",
+    "method": "use",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 1190,
+    "y": 140,
+    "wires": [
+      [
+        "dbg_tg2"
+      ]
+    ]
+  },
+  {
+    "id": "dbg_tg2",
+    "type": "debug",
+    "z": "tab_telegram",
+    "name": "telegram result",
+    "active": false,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 1370,
+    "y": 140,
+    "wires": []
+  },
+  {
+    "id": "http_n8n",
+    "type": "http request",
+    "z": "tab_telegram",
+    "name": "n8n webhook",
+    "method": "use",
+    "ret": "txt",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 1000,
+    "y": 200,
+    "wires": [
+      [
+        "dbg_n8n"
+      ]
+    ]
+  },
+  {
+    "id": "dbg_n8n",
+    "type": "debug",
+    "z": "tab_telegram",
+    "name": "n8n result",
+    "active": false,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 1180,
+    "y": 200,
+    "wires": []
+  },
+  {
+    "id": "c_tab_telegram_220_280",
+    "type": "comment",
+    "z": "tab_telegram",
+    "name": "② ปิดลูปงานซ่อม: Google Form -> Apps Script -> Node-RED -> เครื่องจักร",
+    "info": "",
+    "x": 220,
+    "y": 280,
+    "wires": []
+  },
+  {
+    "id": "inj_rep",
+    "type": "inject",
+    "z": "tab_telegram",
+    "name": "ทุก 20 วินาที",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "20",
+    "crontab": "",
+    "once": true,
+    "onceDelay": "10",
+    "topic": "",
+    "payload": "",
+    "payloadType": "date",
+    "x": 150,
+    "y": 340,
+    "wires": [
+      [
+        "fn_reppoll"
+      ]
+    ]
+  },
+  {
+    "id": "fn_reppoll",
+    "type": "function",
+    "z": "tab_telegram",
+    "name": "Poll repairs",
+    "func": "// =====================================================================\n// ดึงใบแจ้งซ่อมใหม่จาก Google Form (ผ่าน Apps Script) ทุก 20 วินาที\n// =====================================================================\nconst url = env.get(\"SHEETS_URL\") || \"\";\nif (!url || url.includes(\"CHANGE_ME\")) return null;\nconst last = flow.get(\"repairLastRow\");\n// ครั้งแรกหลังเปิดระบบ: ขอแค่เลขแถวล่าสุด ไม่ย้อนทำใบเก่า\nconst after = last === undefined ? -1 : last;\nreturn { url: `${url}?action=repairs&after=${after}`, method: \"GET\" };\n",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 340,
+    "y": 340,
+    "wires": [
+      [
+        "http_rep"
+      ]
+    ]
+  },
+  {
+    "id": "http_rep",
+    "type": "http request",
+    "z": "tab_telegram",
+    "name": "Apps Script",
+    "method": "use",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 530,
+    "y": 340,
+    "wires": [
+      [
+        "fn_repproc"
+      ]
+    ]
+  },
+  {
+    "id": "fn_repproc",
+    "type": "function",
+    "z": "tab_telegram",
+    "name": "Repair -> command",
+    "func": "// =====================================================================\n// ปิดลูปงานซ่อม: Google Form -> Node-RED -> สั่งเครื่อง + แจ้ง Telegram\n// input : { lastRow, repairs: [{row, timestamp, machine, technician, cause, action, result, photo}] }\n// output 1 -> MQTT local (M1-M5) | output 2 -> MQTT HiveMQ (M6)\n// output 3 -> Telegram          | output 4 -> InfluxDB event\n// =====================================================================\nconst r = msg.payload;\nif (!r || typeof r !== \"object\" || r.lastRow === undefined) {\n    node.status({ fill: \"red\", shape: \"ring\", text: \"Apps Script ตอบกลับไม่ถูกต้อง\" });\n    return null;\n}\nconst first = flow.get(\"repairLastRow\") === undefined;\nflow.set(\"repairLastRow\", r.lastRow);\nif (first) {\n    node.status({ fill: \"green\", shape: \"dot\", text: `พร้อมรับใบซ่อม (แถวล่าสุด ${r.lastRow})` });\n    return null;\n}\n\nconst prefix = env.get(\"HIVEMQ_PREFIX\") || \"smf\";\nconst out1 = [], out2 = [], out3 = [], out4 = [];\nconst str = (v) => '\"' + String(v ?? \"\").replace(/([\"\\\\])/g, \"\\\\$1\") + '\"';\n\nfor (const j of r.repairs || []) {\n    const id = String(j.machine || \"\").toUpperCase().match(/M\\d+/);\n    if (!id) continue;\n    const mid = id[0];\n    const done = /เสร็จ|done|complete|ok/i.test(j.result || \"\");\n    const action = done ? \"repair\" : \"maintenance\";\n    const cmd = { payload: JSON.stringify({ action, by: j.technician || \"form\" }) };\n    if (mid === \"M6\") { cmd.topic = `${prefix}/factory/cmd/M6`; out2.push(cmd); }\n    else { cmd.topic = `factory/cmd/${mid}`; out1.push(cmd); }\n\n    const text = done\n        ? `🔧 <b>${mid} ซ่อมเสร็จ</b> โดย ${j.technician || \"-\"}\\nสาเหตุ: ${j.cause || \"-\"}\\nการแก้ไข: ${j.action || \"-\"}\\n➡️ ระบบสั่งเดินเครื่องอัตโนมัติแล้ว`\n        : `🛠️ <b>${mid} เข้าโหมดซ่อมบำรุง</b> (${j.result || \"รอดำเนินการ\"}) โดย ${j.technician || \"-\"}\\nสาเหตุ: ${j.cause || \"-\"}`;\n    const photo = j.photo ? `\\n📷 <a href=\"${j.photo}\">รูปประกอบ (Google Drive)</a>` : \"\";\n    out3.push({ payload: { text: text + photo } });\n\n    out4.push({\n        url: `${env.get(\"INFLUX_URL\")}/api/v2/write?org=${encodeURIComponent(env.get(\"INFLUX_ORG\"))}&bucket=${encodeURIComponent(env.get(\"INFLUX_BUCKET\"))}&precision=ms`,\n        method: \"POST\",\n        headers: { Authorization: \"Token \" + env.get(\"INFLUX_TOKEN\"), \"Content-Type\": \"text/plain; charset=utf-8\" },\n        payload: `event,machine=${mid},level=info,type=${done ? \"REPAIRED\" : \"MAINTENANCE\"} message=${str(`${j.technician || \"\"}: ${j.cause || \"\"} -> ${j.action || \"\"}`)},value=1i ${Date.now()}`,\n    });\n}\nnode.status({ fill: \"green\", shape: \"dot\", text: `แถวล่าสุด ${r.lastRow} | ใบใหม่ ${(r.repairs || []).length}` });\nreturn [out1, out2, out3, out4];\n",
+    "outputs": 4,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 740,
+    "y": 340,
+    "wires": [
+      [
+        "mqtt_local"
+      ],
+      [
+        "mqtt_hive"
+      ],
+      [
+        "fn_tg2"
+      ],
+      [
+        "http_inf2"
+      ]
+    ]
+  },
+  {
+    "id": "http_inf2",
+    "type": "http request",
+    "z": "tab_telegram",
+    "name": "InfluxDB event",
+    "method": "use",
+    "ret": "txt",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 1000,
+    "y": 400,
+    "wires": []
+  },
+  {
+    "id": "catch2",
+    "type": "catch",
+    "z": "tab_telegram",
+    "name": "Errors",
+    "scope": null,
+    "uncaught": false,
+    "x": 140,
+    "y": 460,
+    "wires": [
+      [
+        "dbg_err2"
+      ]
+    ]
+  },
+  {
+    "id": "dbg_err2",
+    "type": "debug",
+    "z": "tab_telegram",
+    "name": "errors",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 320,
+    "y": 460,
+    "wires": []
+  }
+]
