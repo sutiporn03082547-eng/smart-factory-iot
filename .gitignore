@@ -1,0 +1,10 @@
+.env
+nodered/node_modules/
+nodered/.config.*
+nodered/.flows*.backup
+nodered/flows_cred.json
+nodered/lib/
+nodered/package*.json
+nodered/context/
+__pycache__/
+*.pyc
