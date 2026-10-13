@@ -1,0 +1,39 @@
+# GitHub Actions: ตรวจโค้ดทุกครั้งที่ push / Pull Request (W12 GitHub)
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Simulator self-test (ไม่ต้องใช้ MQTT)
+        run: |
+          pip install -r simulator/requirements.txt
+          cd simulator && DRY_RUN=1 TICK_SEC=0 python simulator.py 3 > /dev/null
+      - name: Rebuild generated files and make sure they are committed
+        run: |
+          python tools/build_flows.py
+          python tools/build_dashboards.py
+          git diff --exit-code -- nodered/flows.json grafana/dashboards
+      - name: Validate JSON files
+        run: |
+          for f in nodered/flows.json grafana/dashboards/*.json wokwi/esp32-machine6/diagram.json; do
+            python -m json.tool "$f" > /dev/null && echo "OK $f"
+          done
+      - name: Syntax check Node-RED function code
+        run: |
+          for f in tools/nodered-src/*.js; do
+            node -e "new Function('msg','node','flow','global','env','context', require('fs').readFileSync('$f','utf8'))" && echo "OK $f"
+          done
+      - name: Docker build simulator
+        run: docker build -t smartfactory/simulator ./simulator
