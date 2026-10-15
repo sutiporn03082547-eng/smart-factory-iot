@@ -4,7 +4,7 @@ Mini-Project วิชา **030143375 อินเตอร์เน็ตขอ
 
 ระบบเฝ้าระวังเครื่องจักรในโรงงานแบบครบวงจร ตั้งแต่เครื่องจักร (จำลอง) → เก็บข้อมูล → Dashboard → แจ้งเตือนล่วงหน้าก่อนเครื่องพัง → ใบแจ้งซ่อม → สั่งเดินเครื่องกลับอัตโนมัติ → AI สรุปรายงาน ทำงานบน **คอมพิวเตอร์ 1 เครื่อง + Cloud** ไม่ต้องต่อฮาร์ดแวร์จริง
 
-ใช้เนื้อหา **6 สัปดาห์ (W7–W12) ครบ 27 วัตถุประสงค์** ดูตารางตรวจสอบได้ที่ [docs/01-traceability.md](docs/01-traceability.md)
+ใช้เนื้อหาหลัก **3 สัปดาห์ (W10 Data-Cloud, W11 Private Server, W12 GitHub/Docker/n8n) ครบ 12 วัตถุประสงค์** ดูตารางตรวจสอบได้ที่ [docs/01-traceability.md](docs/01-traceability.md)
 
 ---
 
@@ -17,7 +17,6 @@ flowchart LR
     MQ --> NR["Node-RED<br/>Alarm + Predictive"]
     NR -->|line protocol| IDB[("InfluxDB")]
     IDB --> GFC["Grafana (CasaOS)"]
-    IDB --> GFW["Grafana (Windows)<br/>Engineer"]
     N8N["n8n + AI"] -->|Flux query| IDB
     NR -->|webhook| N8N
   end
@@ -25,12 +24,7 @@ flowchart LR
   NR <-->|Apps Script| GS["Google Sheets / Form / Drive / My Maps"]
   NR <-->|Bot API| TG["📱 Telegram"]
   N8N --> TG
-  subgraph AZ["☁️ Azure Ubuntu VM"]
-    AP["Apache: Factory Portal"]
-    GFA["Grafana: Executive<br/>Viewer + Public + QR"]
-  end
-  GFA -.->|ZeroTier VPN| IDB
-  AP -.->|DDNS + Port Forward| NR
+  NR -.->|code + CI| GH["GitHub + Actions"]
 ```
 
 ## จุดเด่น
@@ -43,23 +37,27 @@ flowchart LR
 | ปิดลูปงานซ่อม | Telegram แจ้งเตือน → ปุ่มเปิด Google Form → ช่างกรอก "ซ่อมเสร็จ" → ระบบสั่งเดินเครื่องเอง |
 | Telegram Bot สองทาง | `/status` `/oee` `/stop` `/run` `/fault` `/maint` `/repair` `/report` `/ask` |
 | AI จากข้อมูลจริง | n8n ดึงข้อมูล InfluxDB ให้ AI สรุปรายงานกะ และตอบคำถามจากข้อมูลจริง |
-| Dashboard 3 ที่ | Grafana บน Windows (วิศวกร), CasaOS, และ Azure (ผู้บริหาร + Viewer + Public + QR) |
-| รันคำสั่งเดียว | `docker compose up -d --build` ได้ทั้ง 6 services + CI บน GitHub Actions |
+| Grafana 2 หน้า | Engineer (สถานะ/อุณหภูมิ/ค่าสั่น ISO 10816/OEE) และ Executive (OEE A×P×Q, ไทม์ไลน์สถานะ) |
+| รันไฟล์เดียว | `INSTALL-CASAOS.bat` / `START-CASAOS.bat` รัน 6 services บน WSL + CasaOS, เลือกพอร์ตว่างอัตโนมัติ + CI บน GitHub Actions |
 
-## เริ่มใช้งานเร็ว (บน WSL Ubuntu)
+## เริ่มใช้งานเร็ว
+
+**Windows (แนะนำ):** ดับเบิลคลิก `INSTALL-CASAOS.bat` ครั้งแรก (ติดตั้ง WSL Ubuntu + CasaOS + 6 services) ครั้งต่อไปใช้ `START-CASAOS.bat` และทดสอบเครื่องเสียด้วย `TEST-FAULT.bat`
+
+**WSL Ubuntu โดยตรง:**
 
 ```bash
-git clone https://github.com/<you>/smart-factory.git
-cd smart-factory
+git clone https://github.com/sutiporn03082547-eng/smart-factory-iot.git
+cd smart-factory-iot
 cp .env.example .env      # แก้ค่า CHANGE_ME
 bash tools/setup-wsl.sh   # ติดตั้ง CasaOS + รันทั้งระบบ
 ```
 
 | Service | URL |
 |---|---|
-| Node-RED | http://localhost:1880 |
+| Node-RED | http://localhost:1880 (ถ้าพอร์ตไม่ว่าง สคริปต์จะเลื่อนเป็น 1881 ดูใน `ports.txt`) |
 | InfluxDB | http://localhost:8086 |
-| Grafana (CasaOS) | http://localhost:3003 |
+| Grafana (CasaOS) | http://localhost:3003 (หรือ 3004) |
 | n8n | http://localhost:5679 |
 | Status API | http://localhost:1880/api/status |
 
@@ -91,7 +89,7 @@ smart-factory/
 ├── n8n/                        # workflow AI Shift Report, Ask AI
 ├── google/apps-script.gs       # Sheets / Form / Drive / My Maps backend
 ├── wokwi/esp32-machine6/       # ESP32 จำลองบน Wokwi (เครื่อง M6)
-├── azure/                      # setup-azure.sh + Factory Portal (Apache)
+├── azure/                      # (ส่วนเสริม ไม่ได้ใช้: เครดิต Azure for Students หมด)
 ├── tools/                      # build scripts, setup-wsl.sh, setup-windows.ps1
 ├── docs/                       # traceability, คู่มือ, สคริปต์เดโม
 └── .github/workflows/ci.yml    # GitHub Actions
